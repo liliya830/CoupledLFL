@@ -1,0 +1,116 @@
+'''
+Created on Apr 15, 2016
+Evaluate the performance of Top-K recommendation:
+    Protocol: leave-1-out evaluation
+    Measures: Hit Ratio and NDCG
+    (more details are in: Xiangnan He, et al. Fast Matrix Factorization for Online Recommendation with Implicit Feedback. SIGIR'16)
+
+@author: hexiangnan
+'''
+import math
+import heapq # for retrieval topK
+import multiprocessing
+import numpy as np
+from time import time
+#from numba import jit, autojit
+
+# Global variables that are shared across processes
+_model = None
+_testRatings = None
+_testNegatives = None
+_K = None
+
+def evaluate_model(model, testRatings, testNegatives,user_review_fea,item_review_fea, K, num_thread):
+    """
+    Evaluate the performance (Hit_Ratio, NDCG) of top-K recommendation
+    Return: score of each test rating.
+    """
+    global _model
+    global _testRatings
+    global _testNegatives
+    global _user_review_fea
+    global _item_review_fea
+    global _K
+    _model = model
+    _testRatings = testRatings
+    _testNegatives = testNegatives
+    _user_review_fea=user_review_fea
+    _item_review_fea=item_review_fea
+    _K = K
+
+    hits, ndcgs = [],[]
+    if(num_thread > 1): # Multi-thread
+        pool = multiprocessing.Pool(processes=num_thread)
+        res = pool.map(eval_one_rating, range(len(_testRatings)))
+        pool.close()
+        pool.join()
+        hits = [r[0] for r in res]
+        ndcgs = [r[1] for r in res]
+        return (hits, ndcgs)
+    # Single thread
+    for idx in range(len(_testRatings)):
+        (hr,ndcg) = eval_one_rating(idx)
+        hits.append(hr)
+        ndcgs.append(ndcg)
+    return (hits,ndcgs)
+
+    # idx=0
+    # for (u, i) in _testRatings.keys():
+    #     (hr, ndcg) = eval_one_rating(u,i,idx)
+    #     idx=idx+1
+    #     hits.append(hr)
+    #     ndcgs.append(ndcg)
+    #
+    # return (hits, ndcgs)
+
+def eval_one_rating(idx):
+
+    rating = _testRatings[idx]#list
+    # print("rating",rating)
+    items = _testNegatives[idx]#list
+    # print("items",items)
+    u = rating[0]
+    # print("u",u)
+    gtItem = rating[1]
+    # print("gTitem",gtItem)
+    items.append(gtItem)
+    # print("items",items)
+    user_id_input,user_review_feature,item_id_input,item_review_feature=[],[],[],[]
+    for i in range(len(items)):
+        user_id_input.append([u])
+        user_review_feature.append(_user_review_fea[u])
+        item_id_input.append([items[i]])
+        item_review_feature.append(_item_review_fea[items[i]])
+
+    user_id_input=np.array(user_id_input)
+    user_review_feature=np.array(user_review_feature)
+    item_id_input=np.array(item_id_input)
+    item_review_feature=np.array(item_review_feature)
+    # Get prediction scores
+    map_item_score = {}
+    # users = np.full(len(items), u, dtype = 'int32')
+    predictions = _model.predict([user_review_feature,item_review_feature,user_id_input,item_id_input],
+                                 batch_size=100, verbose=0)
+    for i in range(len(items)):
+        item = items[i]
+        map_item_score[item] = predictions[i]
+    items.pop()
+
+    # Evaluate top rank list
+    ranklist = heapq.nlargest(_K, map_item_score, key=map_item_score.get)#找出最大的10个数
+    hr = getHitRatio(ranklist, gtItem)
+    ndcg = getNDCG(ranklist, gtItem)
+    return (hr, ndcg)
+
+def getHitRatio(ranklist, gtItem):
+    for item in ranklist:
+        if item == gtItem:
+            return 1
+    return 0
+
+def getNDCG(ranklist, gtItem):
+    for i in range(len(ranklist)):
+        item = ranklist[i]
+        if item == gtItem:
+            return math.log(2) / math.log(i+2)
+    return 0
